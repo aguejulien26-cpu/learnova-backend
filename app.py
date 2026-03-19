@@ -1,10 +1,10 @@
 # ============================================================
-# LEARNOVA — Backend Python (app.py)
+# LEARNOVA — Backend Python avec Google Gemini
 # ============================================================
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import anthropic
+import google.generativeai as genai
 import PyPDF2
 import os
 import io
@@ -13,254 +13,152 @@ import json
 app = Flask(__name__)
 CORS(app, origins=["*"])
 
-client = anthropic.Anthropic(
-    api_key=os.environ.get("ANTHROPIC_API_KEY", "")
-)
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
+model = genai.GenerativeModel("gemini-1.5-flash")
 
-# ── TEST ─────────────────────────────────────────────────────
+def ask_gemini(prompt):
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
-        "status":  "ok",
-        "message": "Learnova Backend est en ligne sur Render !",
-        "version": "1.0"
+        "status": "ok",
+        "message": "Learnova Backend Gemini est en ligne !"
     })
 
-# ── ANALYSER UN PDF ──────────────────────────────────────────
 @app.route('/api/analyze-pdf', methods=['POST'])
 def analyze_pdf():
     if 'file' not in request.files:
         return jsonify({"error": "Aucun fichier reçu"}), 400
-
     fichier = request.files['file']
     titre   = request.form.get('title', 'Cours sans titre')
     niveau  = request.form.get('level', 'Débutant')
-
     try:
-        contenu_pdf = fichier.read()
-        lecteur_pdf = PyPDF2.PdfReader(io.BytesIO(contenu_pdf))
-        texte_complet = ""
-        for numero_page, page in enumerate(lecteur_pdf.pages):
-            texte_page = page.extract_text()
-            if texte_page:
-                texte_complet += f"\n[Page {numero_page + 1}]\n{texte_page}"
+        lecteur_pdf = PyPDF2.PdfReader(io.BytesIO(fichier.read()))
+        texte = ""
+        for i, page in enumerate(lecteur_pdf.pages):
+            t = page.extract_text()
+            if t:
+                texte += f"\n[Page {i+1}]\n{t}"
         nb_pages = len(lecteur_pdf.pages)
-        texte_pour_ia = texte_complet[:6000]
-    except Exception as erreur:
-        return jsonify({"error": f"Impossible de lire le PDF : {str(erreur)}"}), 400
+        texte = texte[:6000]
+    except Exception as e:
+        return jsonify({"error": f"Impossible de lire le PDF : {str(e)}"}), 400
 
-    prompt = f"""Tu es un expert pédagogique pour Learnova.
-Analyse ce cours "{titre}" (niveau: {niveau}, {nb_pages} pages).
-
-CONTENU :
-{texte_pour_ia}
-
+    prompt = f"""Expert pédagogique Learnova. Analyse "{titre}" ({niveau}, {nb_pages} pages).
+CONTENU : {texte}
 Génère UNIQUEMENT ce JSON :
 {{
-  "resume": "Résumé en 3-4 phrases",
-  "concepts_cles": ["concept1", "concept2", "concept3"],
-  "chapitres": [
-    {{
-      "numero": 1,
-      "titre": "Titre",
-      "description": "Description",
-      "lecons": ["Leçon 1", "Leçon 2"],
-      "duree_minutes": 20
-    }}
-  ],
-  "quiz": [
-    {{
-      "question": "Question ?",
-      "options": ["A", "B", "C", "D"],
-      "correct": 0,
-      "explication": "Explication"
-    }}
-  ],
+  "resume": "Résumé 3-4 phrases",
+  "concepts_cles": ["c1","c2","c3"],
+  "chapitres": [{{"numero":1,"titre":"Titre","description":"Desc","lecons":["L1","L2"],"duree_minutes":20}}],
+  "quiz": [{{"question":"Q?","options":["A","B","C","D"],"correct":0,"explication":"Exp"}}],
   "difficulte": "Débutant",
-  "duree_totale": "2h30",
-  "objectifs": ["Objectif 1", "Objectif 2"]
+  "duree_totale": "2h",
+  "objectifs": ["O1","O2"]
 }}
-
-Génère 5 chapitres et 10 questions quiz. JSON uniquement."""
+5 chapitres, 10 quiz. JSON uniquement."""
 
     try:
-        reponse = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        texte_reponse = reponse.content[0].text.strip()
-        if texte_reponse.startswith("```"):
-            texte_reponse = texte_reponse.split("```")[1]
-            if texte_reponse.startswith("json"):
-                texte_reponse = texte_reponse[4:]
-        donnees = json.loads(texte_reponse)
-        donnees["titre"]    = titre
-        donnees["nb_pages"] = nb_pages
-        donnees["status"]   = "success"
-        return jsonify(donnees)
-    except json.JSONDecodeError:
-        return jsonify({"error": "L'IA n'a pas retourné un JSON valide."}), 500
-    except Exception as erreur:
-        return jsonify({"error": f"Erreur IA : {str(erreur)}"}), 500
+        reponse = ask_gemini(prompt)
+        if reponse.startswith("```"):
+            reponse = reponse.split("```")[1]
+            if reponse.startswith("json"):
+                reponse = reponse[4:]
+        data = json.loads(reponse)
+        data.update({"titre": titre, "nb_pages": nb_pages, "status": "success"})
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-
-# ── RÉPONDRE AUX QUESTIONS ───────────────────────────────────
 @app.route('/api/ask-ai', methods=['POST'])
 def ask_ai():
-    donnees        = request.json or {}
-    question       = donnees.get('question', '').strip()
-    contexte_cours = donnees.get('course_context', '')[:3000]
-    titre_cours    = donnees.get('course_title', 'ce cours')
-
+    d = request.json or {}
+    question = d.get('question', '').strip()
+    contexte = d.get('course_context', '')[:3000]
+    titre    = d.get('course_title', 'ce cours')
     if not question:
         return jsonify({"error": "Question vide"}), 400
-
-    prompt = f"""Tu es un professeur expert Learnova.
-Tu enseignes : "{titre_cours}"
-Contexte : {contexte_cours}
+    prompt = f"""Professeur expert Learnova. Cours : "{titre}".
+Contexte : {contexte}
 Question : {question}
-
-Réponds clairement, avec exemple si possible, en français, max 3 paragraphes."""
-
+Réponds clairement avec exemple, en français, max 3 paragraphes."""
     try:
-        reponse = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=800,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return jsonify({"answer": reponse.content[0].text, "status": "success"})
-    except Exception as erreur:
-        return jsonify({"error": str(erreur)}), 500
+        return jsonify({"answer": ask_gemini(prompt), "status": "success"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-
-# ── GÉNÉRER UN PLAN DE SESSION ───────────────────────────────
 @app.route('/api/generate-session-plan', methods=['POST'])
 def generate_session_plan():
-    donnees = request.json or {}
-    sujet   = donnees.get('subject', '')
-    format_ = donnees.get('format', 'session unique')
-    niveau  = donnees.get('level', 'Tous niveaux')
-
+    d      = request.json or {}
+    sujet  = d.get('subject', '')
+    format_= d.get('format', 'session unique')
+    niveau = d.get('level', 'Tous niveaux')
     if not sujet:
         return jsonify({"error": "Sujet manquant"}), 400
-
-    prompt = f"""Génère un plan de session Learnova pour :
-Sujet : "{sujet}" | Format : {format_} | Niveau : {niveau}
-
+    prompt = f"""Plan session Learnova : "{sujet}" | {format_} | {niveau}
 JSON uniquement :
 {{
-  "plan": [
-    {{
-      "time": "00:00",
-      "topic": "Titre",
-      "type": "lesson",
-      "duration_min": 20,
-      "description": "Description"
-    }}
-  ],
+  "plan": [{{"time":"00:00","topic":"Titre","type":"lesson","duration_min":20,"description":"Desc"}}],
   "duree_totale": "2h",
   "nb_challenges": 2,
   "nb_quiz": 1,
-  "message_ouverture": "Message de bienvenue"
+  "message_ouverture": "Bienvenue !"
 }}
-Types: lesson, challenge, quiz, break. JSON uniquement."""
-
+Types: lesson, challenge, quiz, break."""
     try:
-        reponse = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        texte = reponse.content[0].text.strip()
+        texte = ask_gemini(prompt)
         if texte.startswith("```"):
             texte = texte.split("```")[1]
             if texte.startswith("json"):
                 texte = texte[4:]
         return jsonify(json.loads(texte))
-    except Exception as erreur:
-        return jsonify({"error": str(erreur)}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-
-# ── GÉNÉRER UN QUIZ ──────────────────────────────────────────
 @app.route('/api/generate-quiz', methods=['POST'])
 def generate_quiz():
-    donnees = request.json or {}
-    sujet   = donnees.get('subject', '')
-    niveau  = donnees.get('level', 'Débutant')
-    nb      = donnees.get('num_questions', 5)
-
-    prompt = f"""Génère {nb} questions quiz sur "{sujet}" (niveau: {niveau}).
-JSON uniquement :
-{{
-  "quiz": [
-    {{
-      "question": "Question ?",
-      "options": ["A", "B", "C", "D"],
-      "correct": 0,
-      "explication": "Explication"
-    }}
-  ]
-}}"""
-
+    d     = request.json or {}
+    sujet = d.get('subject', '')
+    niveau= d.get('level', 'Débutant')
+    nb    = d.get('num_questions', 5)
+    prompt = f"""Génère {nb} questions quiz sur "{sujet}" ({niveau}).
+JSON : {{"quiz":[{{"question":"Q?","options":["A","B","C","D"],"correct":0,"explication":"Exp"}}]}}"""
     try:
-        reponse = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        texte = reponse.content[0].text.strip()
+        texte = ask_gemini(prompt)
         if texte.startswith("```"):
             texte = texte.split("```")[1]
             if texte.startswith("json"):
                 texte = texte[4:]
         return jsonify(json.loads(texte))
-    except Exception as erreur:
-        return jsonify({"error": str(erreur)}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-
-# ── L'IA ENSEIGNE EN LIVE ────────────────────────────────────
 @app.route('/api/teach', methods=['POST'])
 def teach():
-    donnees       = request.json or {}
-    sujet         = donnees.get('topic', '')
-    type_activite = donnees.get('type', 'lesson')
-    niveau        = donnees.get('level', 'Débutant')
-
-    if type_activite == 'challenge':
-        prompt = f"""Génère un challenge rapide (30 secondes) sur "{sujet}".
-JSON uniquement :
-{{
-  "titre": "Challenge",
-  "question": "Question ?",
-  "options": ["A", "B", "C", "D"],
-  "correct": 0,
-  "explication": "Explication",
-  "points": 100
-}}"""
+    d     = request.json or {}
+    sujet = d.get('topic', '')
+    type_ = d.get('type', 'lesson')
+    niveau= d.get('level', 'Débutant')
+    if type_ == 'challenge':
+        prompt = f"""Challenge 30 sec sur "{sujet}".
+JSON : {{"titre":"Challenge","question":"Q?","options":["A","B","C","D"],"correct":0,"explication":"Exp","points":100}}"""
     else:
-        prompt = f"""Tu es le professeur IA de Learnova. Enseigne en direct sur "{sujet}" (niveau: {niveau}).
-Sois clair, enthousiaste, avec un exemple concret. Max 4 paragraphes. En français."""
-
+        prompt = f"""Professeur IA Learnova. Enseigne "{sujet}" ({niveau}).
+Clair, enthousiaste, exemple concret. Max 4 paragraphes. Français."""
     try:
-        reponse = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        texte = reponse.content[0].text.strip()
-        if type_activite == 'challenge':
+        texte = ask_gemini(prompt)
+        if type_ == 'challenge':
             if texte.startswith("```"):
                 texte = texte.split("```")[1]
                 if texte.startswith("json"):
                     texte = texte[4:]
             return jsonify(json.loads(texte))
         return jsonify({"content": texte, "status": "success"})
-    except Exception as erreur:
-        return jsonify({"error": str(erreur)}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-
-# ── LANCER ───────────────────────────────────────────────────
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
