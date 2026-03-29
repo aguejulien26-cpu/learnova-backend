@@ -1,164 +1,312 @@
-# ============================================================
-# LEARNOVA — Backend Python avec Google Gemini
-# ============================================================
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import google.generativeai as genai
-import PyPDF2
 import os
-import io
 import json
 
+# OpenAI
+from openai import OpenAI
+
 app = Flask(__name__)
-CORS(app, origins=["*"])
+CORS(app, origins="*")
 
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
-model = genai.GenerativeModel("gemini-1.5-flash")
+# Clé OpenAI depuis variable d'environnement Render
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-def ask_gemini(prompt):
-    response = model.generate_content(prompt)
-    return response.text.strip()
+# ── HELPER IA ────────────────────────────────────────────────
+def ask_gpt(system_prompt, user_prompt, json_mode=False):
+    try:
+        kwargs = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.7,
+            "max_tokens": 1500
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
 
-@app.route('/', methods=['GET'])
+        response = client.chat.completions.create(**kwargs)
+        return response.choices[0].message.content
+    except Exception as e:
+        return None
+
+# ── ROUTES ───────────────────────────────────────────────────
+
+@app.route("/")
 def home():
     return jsonify({
         "status": "ok",
-        "message": "Learnova Backend Gemini est en ligne !"
+        "message": "Learnova Backend OpenAI est en ligne !",
+        "version": "2.0"
     })
 
-@app.route('/api/analyze-pdf', methods=['POST'])
-def analyze_pdf():
-    if 'file' not in request.files:
-        return jsonify({"error": "Aucun fichier reçu"}), 400
-    fichier = request.files['file']
-    titre   = request.form.get('title', 'Cours sans titre')
-    niveau  = request.form.get('level', 'Débutant')
-    try:
-        lecteur_pdf = PyPDF2.PdfReader(io.BytesIO(fichier.read()))
-        texte = ""
-        for i, page in enumerate(lecteur_pdf.pages):
-            t = page.extract_text()
-            if t:
-                texte += f"\n[Page {i+1}]\n{t}"
-        nb_pages = len(lecteur_pdf.pages)
-        texte = texte[:6000]
-    except Exception as e:
-        return jsonify({"error": f"Impossible de lire le PDF : {str(e)}"}), 400
-
-    prompt = f"""Expert pédagogique Learnova. Analyse "{titre}" ({niveau}, {nb_pages} pages).
-CONTENU : {texte}
-Génère UNIQUEMENT ce JSON :
-{{
-  "resume": "Résumé 3-4 phrases",
-  "concepts_cles": ["c1","c2","c3"],
-  "chapitres": [{{"numero":1,"titre":"Titre","description":"Desc","lecons":["L1","L2"],"duree_minutes":20}}],
-  "quiz": [{{"question":"Q?","options":["A","B","C","D"],"correct":0,"explication":"Exp"}}],
-  "difficulte": "Débutant",
-  "duree_totale": "2h",
-  "objectifs": ["O1","O2"]
-}}
-5 chapitres, 10 quiz. JSON uniquement."""
-
-    try:
-        reponse = ask_gemini(prompt)
-        if reponse.startswith("```"):
-            reponse = reponse.split("```")[1]
-            if reponse.startswith("json"):
-                reponse = reponse[4:]
-        data = json.loads(reponse)
-        data.update({"titre": titre, "nb_pages": nb_pages, "status": "success"})
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/ask-ai', methods=['POST'])
+@app.route("/api/ask-ai", methods=["POST"])
 def ask_ai():
-    d = request.json or {}
-    question = d.get('question', '').strip()
-    contexte = d.get('course_context', '')[:3000]
-    titre    = d.get('course_title', 'ce cours')
+    """L'apprenant pose une question à l'IA pendant un cours ou live"""
+    data = request.json or {}
+    question = data.get("question", "")
+    course_title = data.get("course_title", "ce cours")
+    course_context = data.get("course_context", "")
+
     if not question:
-        return jsonify({"error": "Question vide"}), 400
-    prompt = f"""Professeur expert Learnova. Cours : "{titre}".
-Contexte : {contexte}
-Question : {question}
-Réponds clairement avec exemple, en français, max 3 paragraphes."""
-    try:
-        return jsonify({"answer": ask_gemini(prompt), "status": "success"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Question manquante"}), 400
 
-@app.route('/api/generate-session-plan', methods=['POST'])
-def generate_session_plan():
-    d      = request.json or {}
-    sujet  = d.get('subject', '')
-    format_= d.get('format', 'session unique')
-    niveau = d.get('level', 'Tous niveaux')
-    if not sujet:
-        return jsonify({"error": "Sujet manquant"}), 400
-    prompt = f"""Plan session Learnova : "{sujet}" | {format_} | {niveau}
-JSON uniquement :
-{{
-  "plan": [{{"time":"00:00","topic":"Titre","type":"lesson","duration_min":20,"description":"Desc"}}],
-  "duree_totale": "2h",
-  "nb_challenges": 2,
-  "nb_quiz": 1,
-  "message_ouverture": "Bienvenue !"
-}}
-Types: lesson, challenge, quiz, break."""
-    try:
-        texte = ask_gemini(prompt)
-        if texte.startswith("```"):
-            texte = texte.split("```")[1]
-            if texte.startswith("json"):
-                texte = texte[4:]
-        return jsonify(json.loads(texte))
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    system = f"""Tu es un professeur IA expert et pédagogue sur le sujet : "{course_title}".
+Contexte du cours : {course_context}
 
-@app.route('/api/generate-quiz', methods=['POST'])
-def generate_quiz():
-    d     = request.json or {}
-    sujet = d.get('subject', '')
-    niveau= d.get('level', 'Débutant')
-    nb    = d.get('num_questions', 5)
-    prompt = f"""Génère {nb} questions quiz sur "{sujet}" ({niveau}).
-JSON : {{"quiz":[{{"question":"Q?","options":["A","B","C","D"],"correct":0,"explication":"Exp"}}]}}"""
-    try:
-        texte = ask_gemini(prompt)
-        if texte.startswith("```"):
-            texte = texte.split("```")[1]
-            if texte.startswith("json"):
-                texte = texte[4:]
-        return jsonify(json.loads(texte))
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+Règles :
+- Réponds en français, de façon claire et pédagogique
+- Sois précis, concis (3-5 phrases max)
+- Donne des exemples concrets si possible
+- Tu t'adresses à un apprenant, sois encourageant
+- Si tu ne sais pas, dis-le honnêtement"""
 
-@app.route('/api/teach', methods=['POST'])
+    answer = ask_gpt(system, question)
+    if not answer:
+        answer = "Excellente question ! Ce concept est fondamental. Je t'invite à explorer le contenu du cours pour approfondir ta compréhension."
+
+    return jsonify({"answer": answer})
+
+
+@app.route("/api/teach", methods=["POST"])
 def teach():
-    d     = request.json or {}
-    sujet = d.get('topic', '')
-    type_ = d.get('type', 'lesson')
-    niveau= d.get('level', 'Débutant')
-    if type_ == 'challenge':
-        prompt = f"""Challenge 30 sec sur "{sujet}".
-JSON : {{"titre":"Challenge","question":"Q?","options":["A","B","C","D"],"correct":0,"explication":"Exp","points":100}}"""
-    else:
-        prompt = f"""Professeur IA Learnova. Enseigne "{sujet}" ({niveau}).
-Clair, enthousiaste, exemple concret. Max 4 paragraphes. Français."""
-    try:
-        texte = ask_gemini(prompt)
-        if type_ == 'challenge':
-            if texte.startswith("```"):
-                texte = texte.split("```")[1]
-                if texte.startswith("json"):
-                    texte = texte[4:]
-            return jsonify(json.loads(texte))
-        return jsonify({"content": texte, "status": "success"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    """L'IA génère du contenu d'enseignement pour le live"""
+    data = request.json or {}
+    topic = data.get("topic", "ce sujet")
+    teach_type = data.get("type", "lesson")
+    level = data.get("level", "Tous niveaux")
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    if teach_type == "lesson":
+        system = f"""Tu es un professeur IA expert qui enseigne en direct.
+Sujet : {topic} | Niveau : {level}
+
+Génère une leçon d'introduction engageante (5-8 phrases).
+Utilise **texte en gras** pour les concepts importants.
+Utilise `code` pour les termes techniques.
+Commence directement par le contenu, pas de formule de politesse."""
+
+        content = ask_gpt(system, f"Génère la leçon d'introduction pour : {topic}")
+        if not content:
+            content = f"**{topic}** est un sujet passionnant ! Aujourd'hui nous allons explorer les concepts fondamentaux ensemble. Posez-moi vos questions à tout moment."
+        return jsonify({"content": content})
+
+    elif teach_type == "challenge":
+        system = """Tu es un professeur IA qui crée des challenges QCM engageants.
+Génère un challenge QCM en JSON avec exactement ce format :
+{
+  "titre": "Challenge rapide !",
+  "question": "La question du challenge",
+  "options": ["Option A", "Option B", "Option C", "Option D"],
+  "correct": 1,
+  "explication": "Explication courte de la bonne réponse"
+}
+correct est l'index (0-3) de la bonne réponse.
+La question doit être liée au sujet."""
+
+        result = ask_gpt(system, f"Crée un challenge QCM sur : {topic}", json_mode=True)
+        try:
+            data_r = json.loads(result)
+            return jsonify(data_r)
+        except:
+            return jsonify({
+                "titre": "Challenge rapide !",
+                "question": f"Qu'est-ce qui est le plus important pour maîtriser {topic} ?",
+                "options": ["Mémoriser la théorie", "Pratiquer régulièrement", "Lire des livres", "Regarder des vidéos"],
+                "correct": 1,
+                "explication": "La pratique régulière est la clé de l'apprentissage efficace."
+            })
+
+    return jsonify({"content": f"Contenu sur {topic}"})
+
+
+@app.route("/api/generate-session-plan", methods=["POST"])
+def generate_session_plan():
+    """L'admin crée une session → l'IA génère le plan complet"""
+    data = request.json or {}
+    subject = data.get("subject", "Formation")
+    format_type = data.get("format", "session unique")
+    level = data.get("level", "Tous niveaux")
+
+    system = """Tu es un expert en formation qui crée des plans de session pédagogiques.
+Génère un plan de session en JSON avec ce format exact :
+{
+  "plan": [
+    {"time": "00:00", "topic": "Nom du module", "type": "lesson"},
+    {"time": "00:20", "topic": "Nom du module", "type": "lesson"},
+    {"time": "00:45", "topic": "Challenge collectif", "type": "challenge"},
+    {"time": "01:00", "topic": "Pause", "type": "break"},
+    {"time": "01:10", "topic": "Module avancé", "type": "lesson"},
+    {"time": "01:50", "topic": "Quiz final", "type": "quiz"}
+  ]
+}
+Types possibles : lesson, challenge, quiz, break
+Adapte le plan au format et au sujet donné."""
+
+    result = ask_gpt(system,
+        f"Crée un plan de session sur '{subject}', format: {format_type}, niveau: {level}",
+        json_mode=True)
+
+    try:
+        plan_data = json.loads(result)
+        return jsonify(plan_data)
+    except:
+        # Fallback
+        return jsonify({"plan": [
+            {"time": "00:00", "topic": f"Introduction à {subject}", "type": "lesson"},
+            {"time": "00:20", "topic": "Concepts fondamentaux", "type": "lesson"},
+            {"time": "00:45", "topic": "Challenge QCM", "type": "challenge"},
+            {"time": "01:00", "topic": "Pause", "type": "break"},
+            {"time": "01:10", "topic": "Approfondissement", "type": "lesson"},
+            {"time": "01:50", "topic": "Quiz final", "type": "quiz"}
+        ]})
+
+
+@app.route("/api/generate-quiz", methods=["POST"])
+def generate_quiz():
+    """Génère un quiz complet pour un cours"""
+    data = request.json or {}
+    subject = data.get("subject", "ce cours")
+    level = data.get("level", "Débutant")
+    num = min(int(data.get("num_questions", 5)), 10)
+
+    system = f"""Tu es un expert qui crée des quiz pédagogiques.
+Génère exactement {num} questions QCM sur "{subject}" (niveau {level}).
+Format JSON exact :
+{{
+  "quiz": [
+    {{
+      "question": "La question ?",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correct": 1,
+      "explication": "Explication de la bonne réponse"
+    }}
+  ]
+}}
+correct est l'index (0-3) de la bonne réponse.
+Les questions doivent couvrir différents aspects du sujet."""
+
+    result = ask_gpt(system,
+        f"Génère {num} questions de quiz sur : {subject}",
+        json_mode=True)
+
+    try:
+        quiz_data = json.loads(result)
+        if "quiz" in quiz_data and len(quiz_data["quiz"]) > 0:
+            return jsonify(quiz_data)
+    except:
+        pass
+
+    # Fallback
+    return jsonify({"quiz": [
+        {
+            "question": f"Quel est le concept le plus important de {subject} ?",
+            "options": ["La théorie pure", "La pratique régulière", "Les diplômes", "La mémoire"],
+            "correct": 1,
+            "explication": "La pratique régulière est toujours la clé de la maîtrise."
+        },
+        {
+            "question": f"Comment progresser efficacement en {subject} ?",
+            "options": ["Lire seulement", "Pratiquer et expérimenter", "Mémoriser", "Copier"],
+            "correct": 1,
+            "explication": "Pratiquer et expérimenter permet une vraie compréhension."
+        }
+    ]})
+
+
+@app.route("/api/analyze-pdf", methods=["POST"])
+def analyze_pdf():
+    """Analyse un PDF uploadé et génère résumé + chapitres + quiz"""
+    if "file" not in request.files:
+        return jsonify({"error": "Aucun fichier reçu"}), 400
+
+    file = request.files["file"]
+    title = request.form.get("title", "Cours")
+    level = request.form.get("level", "Débutant")
+
+    # Lire le PDF
+    try:
+        import PyPDF2
+        import io
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(file.read()))
+        text = ""
+        for i, page in enumerate(pdf_reader.pages):
+            if i >= 20:  # Max 20 pages
+                break
+            text += page.extract_text() + "\n"
+        text = text[:8000]  # Max 8000 chars pour GPT
+    except Exception as e:
+        text = f"Cours sur le sujet : {title}"
+
+    system = """Tu es un expert pédagogue qui analyse des documents PDF.
+Génère une analyse complète en JSON avec ce format exact :
+{
+  "resume": "Résumé en 2-3 phrases",
+  "duree_totale": "2h30",
+  "concepts_cles": ["Concept 1", "Concept 2", "Concept 3"],
+  "objectifs": ["Objectif 1", "Objectif 2"],
+  "chapitres": [
+    {
+      "titre": "Chapitre 1",
+      "lecons": ["Leçon 1.1", "Leçon 1.2"],
+      "duree_minutes": 30
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Question ?",
+      "options": ["A", "B", "C", "D"],
+      "correct": 0,
+      "explication": "Explication"
+    }
+  ]
+}
+Génère 3-5 chapitres et exactement 10 questions de quiz.
+Base-toi sur le contenu du document."""
+
+    result = ask_gpt(system,
+        f"Analyse ce document '{title}' (niveau {level}) :\n\n{text}",
+        json_mode=True)
+
+    try:
+        analysis = json.loads(result)
+        return jsonify(analysis)
+    except:
+        return jsonify({
+            "resume": f"Ce cours couvre les fondamentaux de {title}.",
+            "duree_totale": "2h",
+            "concepts_cles": [title, "Pratique", "Théorie"],
+            "objectifs": [f"Comprendre {title}", "Appliquer les concepts"],
+            "chapitres": [
+                {"titre": "Introduction", "lecons": ["Présentation", "Objectifs"], "duree_minutes": 20},
+                {"titre": "Contenu principal", "lecons": ["Concepts clés", "Exemples pratiques"], "duree_minutes": 60},
+                {"titre": "Conclusion", "lecons": ["Résumé", "Prochaines étapes"], "duree_minutes": 20}
+            ],
+            "quiz": [
+                {"question": f"Qu'est-ce que {title} ?", "options": ["Définition A", "Définition B", "Définition C", "Définition D"], "correct": 0, "explication": f"{title} est un domaine important à maîtriser."}
+            ]
+        })
+
+
+@app.route("/api/community-moderate", methods=["POST"])
+def moderate():
+    """Modération automatique des posts communauté"""
+    data = request.json or {}
+    text = data.get("text", "")
+
+    system = """Tu es un modérateur de communauté éducative.
+Analyse ce texte et réponds en JSON :
+{"approved": true/false, "reason": "raison si refusé"}
+Refuse si : spam, insultes, contenu inapproprié, hors-sujet."""
+
+    result = ask_gpt(system, text, json_mode=True)
+    try:
+        return jsonify(json.loads(result))
+    except:
+        return jsonify({"approved": True})
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
